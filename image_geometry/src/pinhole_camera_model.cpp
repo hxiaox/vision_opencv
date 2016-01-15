@@ -1,6 +1,8 @@
 #include "image_geometry/pinhole_camera_model.h"
 #include <sensor_msgs/distortion_models.h>
 #include <boost/make_shared.hpp>
+#include <opencv2/gpu/gpu.hpp>
+#include <stdio.h>
 
 namespace image_geometry {
 
@@ -16,8 +18,10 @@ struct PinholeCameraModel::Cache
   mutable cv::Mat full_map1, full_map2;
 
   mutable bool reduced_maps_dirty;
+  mutable cv::gpu::GpuMat gpu_reduced_map1, gpu_reduced_map2;
   mutable cv::Mat reduced_map1, reduced_map2;
-  
+  mutable cv::gpu::GpuMat gpu_raw, gpu_rectified;
+
   mutable bool rectified_roi_dirty;
   mutable cv::Rect rectified_roi;
 
@@ -285,7 +289,11 @@ void PinholeCameraModel::rectifyImage(const cv::Mat& raw, cv::Mat& rectified, in
       break;
     case CALIBRATED:
       initRectificationMaps();
-      cv::remap(raw, rectified, cache_->reduced_map1, cache_->reduced_map2, interpolation);
+      cache_->gpu_raw.upload(raw);
+      cv::gpu::remap(
+          cache_->gpu_raw, cache_->gpu_rectified, 
+          cache_->gpu_reduced_map1, cache_->gpu_reduced_map2, interpolation);
+      cache_->gpu_rectified.download(rectified);
       break;
     default:
       assert(cache_->distortion_state == UNKNOWN);
@@ -428,9 +436,10 @@ void PinholeCameraModel::initRectificationMaps() const
       }
     }
     
-    // Note: m1type=CV_16SC2 to use fast fixed-point maps (see cv::remap)
+    // Note: m1type=CV_16SC2 to use fast fixed-point maps (see cv::remap), but
+    // that's not capatible with gpu
     cv::initUndistortRectifyMap(K_binned, D_, R_, P_binned, binned_resolution,
-                                CV_16SC2, cache_->full_map1, cache_->full_map2);
+                                CV_32FC1, cache_->full_map1, cache_->full_map2);
     cache_->full_maps_dirty = false;
   }
 
@@ -457,6 +466,9 @@ void PinholeCameraModel::initRectificationMaps() const
       cache_->reduced_map2 = cache_->full_map2;
     }
     cache_->reduced_maps_dirty = false;
+    // update gpu cache
+    cache_->gpu_reduced_map1 = cv::gpu::GpuMat(cache_->reduced_map1);
+    cache_->gpu_reduced_map2 = cv::gpu::GpuMat(cache_->reduced_map2);
   }
 }
 
